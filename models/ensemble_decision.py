@@ -1,6 +1,7 @@
 """
 Ensemble decision maker combining regime detection and anomaly detection.
 Produces actionable trading signals.
+FIXED: Complete decision rule implementation
 """
 
 import numpy as np
@@ -69,7 +70,7 @@ class EnsembleDecisionMaker:
         if regime == "Crash/Panic":
             return "EXIT"
         elif regime == "Bull Rally" and anomaly_flag:
-            return "REDUCE"
+            return "REDUCE 50%"
         elif regime == "Bull Rally" and not anomaly_flag:
             return "HOLD 100%"
         elif regime == "Stable Growth":

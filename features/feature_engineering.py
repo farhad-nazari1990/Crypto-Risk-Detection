@@ -1,6 +1,7 @@
 """
 Feature engineering module for crypto market data.
 Generates 23+ technical and statistical features.
+FIXED: Ensures proper column access on flattened data
 """
 
 import numpy as np
@@ -39,6 +40,13 @@ class FeatureEngineer:
         
         df = df.copy()
         
+        # Verify required columns exist
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
         # Returns features
         df = self._add_returns(df)
         
@@ -66,6 +74,7 @@ class FeatureEngineer:
         initial_rows = len(df)
         df = df.dropna()
         logger.info(f"Feature engineering complete. Dropped {initial_rows - len(df)} rows with NaN values.")
+        logger.info(f"Final feature set shape: {df.shape}")
         
         return df
     
@@ -152,7 +161,6 @@ class FeatureEngineer:
         """Add skewness and kurtosis of returns."""
         returns = df['Close'].pct_change()
         
-        df['skewness_7d'] = returns.rolling(window=7).apply(lambda x: stats.skew(x), raw=True)
-        df['kurtosis_7d'] = returns.rolling(window=7).apply(lambda x: stats.kurtosis(x), raw=True)
+        df['skewness_7d'] = returns.rolling(window=7).apply(lambda x: stats.skew(x) if len(x) >= 3 else 0, raw=True)
+        df['kurtosis_7d'] = returns.rolling(window=7).apply(lambda x: stats.kurtosis(x) if len(x) >= 4 else 0, raw=True)
         
-        return df

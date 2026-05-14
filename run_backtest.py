@@ -1,6 +1,6 @@
 """
 Main execution script for the Crypto Risk Decision System.
-Runs the entire pipeline end-to-end.
+FIXED: MultiIndex column handling, dynamic date splitting, data flattening
 """
 
 import logging
@@ -36,38 +36,63 @@ logger = logging.getLogger(__name__)
 np.random.seed(RANDOM_SEED)
 
 
+def flatten_yfinance_data(df):
+    """
+    Flatten MultiIndex columns from yfinance download.
+    
+    Args:
+        df: DataFrame with MultiIndex columns from yfinance
+        
+    Returns:
+        DataFrame with standard columns: ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        # Extract the first level (price type) and drop the ticker level
+        df.columns = df.columns.get_level_values(0)
+    
+    # Ensure we have the expected columns
+    expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
+    
+    # Reorder columns if all are present
+    available_cols = [col for col in expected_cols if col in df.columns]
+    df = df[available_cols]
+    
+    logger.info(f"Flattened data shape: {df.shape}")
+    logger.info(f"Columns: {df.columns.tolist()}")
+    
+    return df
+
+
 def download_data():
     """
     Download BTC-USD data from Yahoo Finance.
+    FIXED: Handles MultiIndex columns and returns flattened DataFrame
     """
     
     logger.info("Downloading BTC-USD data...")
     
     try:
-        if USE_RECENT_DATA:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=RECENT_DAYS)
-            
-            data = yf.download(
-                TICKER,
-                start=start_date,
-                end=end_date,
-                progress=False
-            )
-        else:
-            data = yf.download(
-                TICKER,
-                start=START_DATE,
-                end=BACKTEST_END,
-                progress=False
-            )
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=DOWNLOAD_DAYS)
+        
+        data = yf.download(
+            TICKER,
+            start=start_date,
+            end=end_date,
+            progress=False
+        )
         
         if data.empty:
             raise ValueError("No data downloaded.")
         
-        data.to_csv(DATA_DIR / "btc_usd_data.csv")
+        # FIX: Flatten MultiIndex columns
+        data = flatten_yfinance_data(data)
         
-        logger.info(f"Downloaded {len(data)} rows.")
+        logger.info(f"Downloaded {len(data)} rows from {data.index[0]} to {data.index[-1]}")
+        logger.info(f"Date range: {(data.index[-1] - data.index[0]).days} days")
+        
+        # Save raw data
+        data.to_csv(DATA_DIR / "btc_usd_data.csv")
         
         return data
     
@@ -76,9 +101,34 @@ def download_data():
         raise
 
 
+def split_train_test(df, train_ratio=0.70):
+    """
+    Split data into training and testing sets.
+    
+    Args:
+        df: Full DataFrame
+        train_ratio: Proportion of data for training
+        
+    Returns:
+        Tuple of (train_df, test_df, split_date)
+    """
+    split_idx = int(len(df) * train_ratio)
+    
+    train_df = df.iloc[:split_idx]
+    test_df = df.iloc[split_idx:]
+    
+    split_date = test_df.index[0]
+    
+    logger.info(f"Train period: {train_df.index[0]} to {train_df.index[-1]} ({len(train_df)} days)")
+    logger.info(f"Test period: {test_df.index[0]} to {test_df.index[-1]} ({len(test_df)} days)")
+    
+    return train_df, test_df, split_date
+
+
 def run_pipeline():
     """
     Execute complete risk decision system pipeline.
+    FIXED: Dynamic date splitting, proper data handling
     """
     
     logger.info("=" * 60)
@@ -88,11 +138,26 @@ def run_pipeline():
     # Step 1: Download data
     raw_data = download_data()
     
-    # Step 2: Feature engineering
+    # Step 2: Feature engineering on full dataset
     feature_engineer = FeatureEngineer(FEATURE_CONFIG)
     features_df = feature_engineer.engineer_features(raw_data)
     
-    # Step 3: Regime detection
+    logger.info(f"Features engineered. Shape: {features_df.shape}")
+    logger.info(f"Feature columns: {features_df.columns.tolist()}")
+    
+    # Step 3: Split into train/test
+    if USE_DYNAMIC_SPLIT:
+        train_features, test_features, split_date = split_train_test(
+            features_df, 
+            TRAIN_SPLIT_RATIO
+        )
+    else:
+        # Use hardcoded dates (fallback)
+        train_features = features_df.loc[:BACKTEST_START]
+        test_features = features_df.loc[BACKTEST_START:BACKTEST_END]
+        split_date = test_features.index[0]
+    
+    # Step 4: Regime detection - train on training data
     regime_detector = RegimeDetectorHMM(
         HMM_CONFIG,
         REGIME_LABELS
@@ -100,14 +165,19 @@ def run_pipeline():
     
     regime_features = get_regime_features()
     
-    regime_detector.fit(features_df, regime_features)
+    logger.info("Training regime detection model...")
+    regime_detector.fit(train_features, regime_features)
     
-    regimes = regime_detector.predict(features_df)
+    # Predict on full dataset for visualization
+    regimes_full = regime_detector.predict(features_df)
+    
+    # Predict on test set for backtest
+    regimes_test = regime_detector.predict(test_features)
     
     # Save regime predictions
     regime_predictions = pd.DataFrame({
         'Date': features_df.index,
-        'regime': regimes
+        'regime': regimes_full
     })
     
     regime_predictions.to_csv(
@@ -115,7 +185,7 @@ def run_pipeline():
         index=False
     )
     
-    # Step 4: Anomaly detection
+    # Step 5: Anomaly detection - train on training data
     anomaly_features = get_anomaly_features()
     
     # Isolation Forest
@@ -123,37 +193,47 @@ def run_pipeline():
         ANOMALY_CONFIG['isolation_forest']
     )
     
-    iso_detector.fit(features_df, anomaly_features)
+    logger.info("Training Isolation Forest anomaly detector...")
+    iso_detector.fit(train_features, anomaly_features)
     
-    iso_anomalies = iso_detector.predict(features_df)
+    iso_anomalies_full = iso_detector.predict(features_df)
+    iso_anomalies_test = iso_detector.predict(test_features)
     
     # MAD anomalies
     mad_detector = AnomalyDetectorMAD(
         ANOMALY_CONFIG['mad']
     )
     
-    mad_anomalies = mad_detector.detect(features_df)
+    mad_anomalies_full = mad_detector.detect(features_df)
+    mad_anomalies_test = mad_detector.detect(test_features)
     
     # CUSUM anomalies
     cusum_detector = AnomalyDetectorCUSUM(
         ANOMALY_CONFIG['cusum']
     )
     
-    cusum_anomalies = cusum_detector.detect(features_df)
+    cusum_anomalies_full = cusum_detector.detect(features_df)
+    cusum_anomalies_test = cusum_detector.detect(test_features)
     
-    # Ensemble anomaly decision
-    combined_anomalies = (
-        iso_anomalies.astype(int) +
-        mad_anomalies.astype(int) +
-        cusum_anomalies.astype(int)
+    # Ensemble anomaly decision (voting: 2 out of 3)
+    combined_anomalies_full = (
+        iso_anomalies_full.astype(int) +
+        mad_anomalies_full.astype(int) +
+        cusum_anomalies_full.astype(int)
+    ) >= 2
+    
+    combined_anomalies_test = (
+        iso_anomalies_test.astype(int) +
+        mad_anomalies_test.astype(int) +
+        cusum_anomalies_test.astype(int)
     ) >= 2
     
     anomaly_predictions = pd.DataFrame({
         'Date': features_df.index,
-        'isolation_forest': iso_anomalies,
-        'mad': mad_anomalies,
-        'cusum': cusum_anomalies,
-        'anomaly_flag': combined_anomalies
+        'isolation_forest': iso_anomalies_full,
+        'mad': mad_anomalies_full,
+        'cusum': cusum_anomalies_full,
+        'anomaly_flag': combined_anomalies_full
     })
     
     anomaly_predictions.to_csv(
@@ -161,21 +241,25 @@ def run_pipeline():
         index=False
     )
     
-    # Step 5: Generate decisions
+    # Step 6: Generate decisions for full dataset (for visualization)
     decision_maker = EnsembleDecisionMaker(POSITION_SIZES)
     
-    decisions, positions = decision_maker.make_decisions(
-        regimes,
-        combined_anomalies
+    decisions_full, positions_full = decision_maker.make_decisions(
+        regimes_full,
+        combined_anomalies_full
     )
     
+    decisions_test, positions_test = decision_maker.make_decisions(
+        regimes_test,
+        combined_anomalies_test
+    )
+    
+    # Create combined DataFrame for full dataset
     combined_df = features_df.copy()
-    
-    combined_df['regime'] = regimes
-    combined_df['anomaly_flag'] = combined_anomalies
-    combined_df['decision'] = decisions
-    combined_df['position'] = positions
-    
+    combined_df['regime'] = regimes_full
+    combined_df['anomaly_flag'] = combined_anomalies_full
+    combined_df['decision'] = decisions_full
+    combined_df['position'] = positions_full
     combined_df.reset_index(inplace=True)
     
     combined_df.to_csv(
@@ -183,17 +267,19 @@ def run_pipeline():
         index=False
     )
     
-    # Step 6: Backtesting
+    # Step 7: Backtesting on test period only
     backtest_engine = BacktestEngine(
         initial_capital=INITIAL_CAPITAL,
         transaction_cost=TRANSACTION_COST
     )
     
-    buy_hold_results = backtest_engine.run_buy_and_hold(combined_df)
+    logger.info("Running backtest on test period...")
+    
+    buy_hold_results = backtest_engine.run_buy_and_hold(test_features)
     
     model_results = backtest_engine.run_model_strategy(
-        combined_df,
-        positions
+        test_features,
+        positions_test
     )
     
     comparison_table = backtest_engine.compare_strategies(
@@ -201,12 +287,17 @@ def run_pipeline():
         model_results
     )
     
+    logger.info("\n" + "=" * 60)
+    logger.info("BACKTEST RESULTS (Test Period Only)")
+    logger.info("=" * 60)
+    logger.info(f"\n{comparison_table.to_string(index=False)}")
+    
     comparison_table.to_csv(
         OUTPUT_DIR / "strategy_comparison.csv",
         index=False
     )
     
-    # Step 7: Create chart
+    # Step 8: Create chart (full dataset for context)
     chart_df = combined_df.copy()
     chart_df.set_index('Date', inplace=True)
     
@@ -215,27 +306,35 @@ def run_pipeline():
         OUTPUT_DIR / "case_study_chart.html"
     )
     
-    # Step 8: Generate golden sentence
+    # Step 9: Generate golden sentence
     bh_dd = buy_hold_results['metrics']['max_drawdown_pct']
     model_dd = model_results['metrics']['max_drawdown_pct']
     
     bh_return = buy_hold_results['metrics']['total_return_pct']
     model_return = model_results['metrics']['total_return_pct']
     
-    preserved_return = (
-        model_return / bh_return * 100
-        if bh_return != 0 else 0
-    )
+    dd_reduction = bh_dd - model_dd
+    
+    if bh_return != 0:
+        preserved_return = (model_return / bh_return * 100)
+    else:
+        preserved_return = 0
     
     golden_sentence = (
-        f"During the backtest period, our combined regime + anomaly "
-        f"system reduced maximum drawdown from {bh_dd:.2f}% "
-        f"to {model_dd:.2f}% while preserving "
-        f"{preserved_return:.2f}% of total return."
+        f"During the backtest period ({test_features.index[0].strftime('%Y-%m-%d')} to "
+        f"{test_features.index[-1].strftime('%Y-%m-%d')}), our combined regime + anomaly "
+        f"system reduced maximum drawdown by {dd_reduction:.2f} percentage points "
+        f"(from {bh_dd:.2f}% to {model_dd:.2f}%) while achieving "
+        f"{model_return:.2f}% total return vs {bh_return:.2f}% for buy-and-hold."
     )
     
-    # Step 9: Save metrics
+    # Step 10: Save metrics
     metrics_output = {
+        'backtest_period': {
+            'start': test_features.index[0].strftime('%Y-%m-%d'),
+            'end': test_features.index[-1].strftime('%Y-%m-%d'),
+            'days': len(test_features)
+        },
         'buy_hold': buy_hold_results['metrics'],
         'model_strategy': model_results['metrics'],
         'golden_sentence': golden_sentence
@@ -251,17 +350,22 @@ def run_pipeline():
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
     
-    logger.info(f"Golden Sentence: {golden_sentence}")
+    logger.info(f"\nGolden Sentence:\n{golden_sentence}")
     
     print("\n")
     print("=" * 60)
     print("CASE STUDY RESULTS")
     print("=" * 60)
-    print(comparison_table)
+    print(comparison_table.to_string(index=False))
     print("\n")
     print(golden_sentence)
-    print("\nOutputs saved to:")
-    print(f"- {OUTPUT_DIR}")
+    print("\n" + "=" * 60)
+    print("OUTPUTS SAVED TO:")
+    print("=" * 60)
+    print(f"📊 Chart: {OUTPUT_DIR / 'case_study_chart.html'}")
+    print(f"📈 Signals: {OUTPUT_DIR / 'combined_signals.csv'}")
+    print(f"📉 Comparison: {OUTPUT_DIR / 'strategy_comparison.csv'}")
+    print(f"📋 Metrics: {OUTPUT_DIR / 'case_study_metrics.json'}")
     print("=" * 60)
 
 

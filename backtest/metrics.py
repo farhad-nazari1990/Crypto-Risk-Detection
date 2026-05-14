@@ -1,5 +1,6 @@
 """
 Performance metrics calculation for backtesting.
+FIXED: Sharpe Ratio Series comparison bug
 """
 
 import numpy as np
@@ -26,13 +27,17 @@ def calculate_max_drawdown(equity_curve):
 def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
     """
     Calculate annualized Sharpe ratio.
+    FIXED: Convert Series std() to scalar before comparison
     """
     excess_returns = returns - risk_free_rate / 252
     
-    if returns.std() == 0:
+    # FIX: Convert std() result to float for comparison
+    returns_std = float(returns.std())
+    
+    if returns_std == 0 or np.isnan(returns_std):
         return 0.0
     
-    sharpe = np.sqrt(252) * excess_returns.mean() / returns.std()
+    sharpe = np.sqrt(252) * float(excess_returns.mean()) / returns_std
     
     return sharpe
 
@@ -43,6 +48,9 @@ def calculate_winning_days_percentage(returns):
     """
     winning_days = (returns > 0).sum()
     total_days = len(returns)
+    
+    if total_days == 0:
+        return 0.0
     
     return (winning_days / total_days) * 100
 

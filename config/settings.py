@@ -22,13 +22,18 @@ MODELS_DIR.mkdir(exist_ok=True)
 
 # Data settings
 TICKER = "BTC-USD"
-START_DATE = "2024-12-15"  # Extended history for feature calculation
-BACKTEST_START = "2025-02-15"
-BACKTEST_END = "2025-04-15"
 
-# If future dates, use most recent 60 days
-USE_RECENT_DATA = True  # Set to True to use most recent 60 days instead
-RECENT_DAYS = 90  # Download 90 days to have buffer for feature calculation
+# Use dynamic date splitting instead of hardcoded dates
+USE_DYNAMIC_SPLIT = True  # Set to True to automatically split data 70/30
+TRAIN_SPLIT_RATIO = 0.70  # 70% for training, 30% for backtest
+
+# Fallback dates (only used if USE_DYNAMIC_SPLIT = False)
+START_DATE = "2026-01-14"
+BACKTEST_START = "2026-04-08"
+BACKTEST_END = "2026-05-14"
+
+# Download settings
+DOWNLOAD_DAYS = 150  # Download last 150 days to ensure enough data
 
 # Feature engineering settings
 FEATURE_CONFIG = {
